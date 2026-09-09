@@ -164,6 +164,8 @@ def calculate_bmp(processed: pd.DataFrame, doe: pd.DataFrame, plateau: pd.DataFr
 
     doe = doe.copy()
     doe["Run ID"] = doe["Run ID"].astype(str).str.strip()
+    processed = processed.copy()
+    processed["Run ID"] = processed["Run ID"].astype(str).str.strip()
     blanks = doe[doe["Type"].astype(str).str.contains("Blank", case=False, na=False)]["Run ID"].unique()
     blank_data = processed[processed["Run ID"].isin(blanks)]
     if blank_data.empty:
@@ -174,22 +176,33 @@ def calculate_bmp(processed: pd.DataFrame, doe: pd.DataFrame, plateau: pd.DataFr
     corrected["Net methane"] = corrected["Cumulative Methane (mL)"] - corrected["Blank methane"]
 
     records = []
-    for _, row in doe.iterrows():
-        run_id = row["Run ID"]
+    for run_id in processed["Run ID"].unique():
         if run_id in blanks:
             continue
-        mass = pd.to_numeric(row.get("g.1"), errors="coerce")
-        vs_percent = pd.to_numeric(row.get("VS_FS"), errors="coerce")
-        if pd.isna(mass) or pd.isna(vs_percent) or mass <= 0 or vs_percent <= 0:
+
+        doe_rows = doe[doe["Run ID"] == run_id]
+        if doe_rows.empty:
             continue
-        vs_grams = mass * vs_percent / 100
+
+        doe_row = doe_rows.iloc[0]
+        vs_grams = pd.to_numeric(doe_row.get("TS_FS"), errors="coerce")
+        if pd.isna(vs_grams):
+            vs_grams = pd.to_numeric(doe_row.get("VS added (g)"), errors="coerce")
+        if pd.isna(vs_grams):
+            mass = pd.to_numeric(doe_row.get("g.1"), errors="coerce")
+            vs_percent = pd.to_numeric(doe_row.get("VS_FS"), errors="coerce")
+            if pd.notna(mass) and pd.notna(vs_percent):
+                vs_grams = mass * vs_percent / 100
+        if pd.isna(vs_grams) or vs_grams <= 0:
+            continue
+
         run_data = corrected[corrected["Run ID"] == run_id].sort_values("Day")
         if run_data.empty or vs_grams <= 0:
             continue
         records.append(
             {
                 "Run ID": run_id,
-                "Type": row.get("Type", ""),
+                "Type": doe_row.get("Type", ""),
                 "VS (g)": vs_grams,
                 "Final net methane (mL)": run_data["Net methane"].iloc[-1],
                 "BMP (mL CH4/g VS)": run_data["Net methane"].iloc[-1] / vs_grams,
@@ -452,9 +465,17 @@ def main() -> None:
         return
 
     bmp = pd.DataFrame()
+    plateau_reached = not plateau.empty and plateau["Status"].eq("REACHED PLATEAU").all()
     with st.sidebar:
         st.header("Analysis")
-        calculate = st.checkbox("Calculate blank-corrected BMP", value=True)
+        if plateau_reached:
+            calculate = st.checkbox("Calculate blank-corrected BMP", value=True)
+        else:
+            st.warning("One or more runs did not reach the plateau criterion.")
+            calculate = st.checkbox(
+                "Calculate BMP anyway for an indicative result",
+                value=True,
+            )
         report_name = f"{Path(uploaded.name).stem}_BMP_report.html"
 
     if calculate:
